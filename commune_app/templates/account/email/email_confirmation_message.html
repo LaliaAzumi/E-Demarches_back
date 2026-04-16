@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Confirmation de votre email</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #2c3e50;">Bonjour {{ user.nom }},</h2>
+        
+        <p>Merci de vous être inscrit sur la <strong>plateforme de la Commune</strong>.</p>
+        
+        <p>Pour confirmer votre adresse email et activer votre compte, veuillez cliquer sur le bouton ci-dessous :</p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{{ activate_url }}" 
+               style="background-color: #3498db; color: white; padding: 12px 30px; 
+                      text-decoration: none; border-radius: 5px; display: inline-block;">
+                Confirmer mon email
+            </a>
+        </div>
+        
+        <p>Ou copiez ce lien dans votre navigateur :</p>
+        <p style="word-break: break-all; color: #3498db;">{{ activate_url }}</p>
+        
+        <p style="color: #e74c3c;"><strong>Ce lien expirera dans 3 jours.</strong></p>
+        
+        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+        
+        <p style="font-size: 12px; color: #7f8c8d;">
+            Si vous n'avez pas créé de compte, vous pouvez ignorer cet email.
+        </p>
+        
+        <p>Cordialement,<br>
+        <strong>L'équipe de la Commune</strong></p>
+    </div>
+</body>
+</html>

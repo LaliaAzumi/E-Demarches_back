@@ -1,0 +1,14 @@
+Bonjour {{ user.nom }},
+
+Merci de vous être inscrit sur la plateforme de la Commune.
+
+Pour confirmer votre adresse email et activer votre compte, veuillez cliquer sur le lien suivant :
+
+{{ activate_url }}
+
+Ce lien expirera dans 3 jours.
+
+Si vous n'avez pas créé de compte, vous pouvez ignorer cet email.
+
+Cordialement,
+L'équipe de la Commune
