@@ -227,6 +227,65 @@ class NotificationController {
       });
     }
   }
+
+  /**
+   * POST /notifications/notify
+   * Endpoint appelé par le backend Python pour émettre des notifications WebSocket
+   * 
+   * BODY:
+   *   - targetUserId: ID de l'utilisateur cible
+   *   - targetRole: 'agents' | 'admins' pour notifications groupées
+   *   - notification: { type, title, message, data }
+   */
+  static async notifyWebSocket(req, res) {
+    try {
+      const { targetUserId, targetRole, notification } = req.body;
+      
+      if (!req.io) {
+        return res.status(500).json({
+          success: false,
+          message: 'WebSocket non disponible'
+        });
+      }
+      
+      let delivered = false;
+      
+      // Notification à un utilisateur spécifique
+      if (targetUserId) {
+        const room = `user_${targetUserId}`;
+        req.io.to(room).emit('notification', {
+          ...notification,
+          timestamp: new Date().toISOString(),
+          delivered: true
+        });
+        delivered = true;
+        console.log(`📨 Notification WebSocket envoyée à user_${targetUserId}`);
+      }
+      
+      // Notification à un groupe (agents ou admins)
+      if (targetRole) {
+        req.io.to(targetRole).emit('notification', {
+          ...notification,
+          timestamp: new Date().toISOString(),
+          target: targetRole
+        });
+        delivered = true;
+        console.log(`📨 Notification WebSocket envoyée aux ${targetRole}`);
+      }
+      
+      res.json({
+        success: true,
+        delivered,
+        message: delivered ? 'Notification émise' : 'Aucune cible spécifiée'
+      });
+    } catch (error) {
+      console.error('[NotificationController] notifyWebSocket error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de l\'émission WebSocket'
+      });
+    }
+  }
 }
 
 module.exports = NotificationController;

@@ -38,4 +38,8 @@ router.delete('/:id', NotificationController.delete);
 // POST /notifications/envoyer-groupe - Envoi groupé (admin/agents)
 router.post('/envoyer-groupe', requireRole('agent', 'administrateur'), NotificationController.envoyerGroupe);
 
+// POST /notifications/notify - Endpoint pour Python (notifications temps réel)
+// Ce endpoint est appelé par le backend Python pour émettre des notifications WebSocket
+router.post('/notify', NotificationController.notifyWebSocket);
+
 module.exports = router;

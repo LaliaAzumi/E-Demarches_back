@@ -17,7 +17,7 @@ class AuthService {
    * Inscription standard (via Django)
    */
   static async register(data) {
-    return apiClient.post('/auth/registration/', null, data);
+    return apiClient.post('/auth/register/', null, data);
   }
 
   /**

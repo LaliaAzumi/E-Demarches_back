@@ -1,722 +1,1363 @@
-from django.db import models, transaction
-from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+"""
+================================================================================
+FICHIER: models.py
+APPLICATION: core
+RÔLE: Modèles Django ORM - Mapping Domain Entities
+
+ARCHITECTURE:
+    Ce fichier mappe les entités du Domain Layer vers les modèles Django ORM.
+    Il fait le pont entre la logique métier pure et la persistance.
+
+    ORGANISATION:
+        1. Utilisateur (Custom User Model)
+        2. Profils (Citoyen, Agent, Administrateur)
+        3. Services et Demandes
+        4. Documents et Traitements
+        5. Rendez-vous
+        6. Notifications
+        7. FAQ
+
+    HÉRITAGE:
+        - Utilisateur hérite de AbstractBaseUser
+        - Les autres modèles héritent de models.Model
+
+    MIXINS DJANGO:
+        - TimeStampedModel: created_at, updated_at
+
+AGILE: Models = Domain Entities Persistence
+================================================================================
+"""
+
+from django.db import models
+from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
+from django.core.validators import EmailValidator
 from django.core.exceptions import ValidationError
-from django.db.models import Q, Count
-import os
 
-
-class TimestampMixin(models.Model):
-    """Mixin abstrait pour ajouter des timestamps automatiques."""
-    created_at = models.DateTimeField(default=timezone.now)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        abstract = True
-
+# ============================================================================
+# MANAGERS PERSONNALISÉS
+# ============================================================================
 
 class UtilisateurManager(BaseUserManager):
-    """Manager personnalisé pour le modèle Utilisateur."""
+    """
+    Manager personnalisé pour le modèle Utilisateur.
     
-    def create_user(self, email: str, nom: str, prenom: str, telephone: str, 
-                    password: str = None, role: str = 'citoyen') -> 'Utilisateur':
-        if not email:
-            raise ValueError('L\'email est obligatoire')
-        if not nom or not prenom:
-            raise ValueError('Le nom et prénom sont obligatoires')
+    RESPONSABILITÉS:
+        - Création d'utilisateurs
+        - Création de superutilisateurs
+        - Requêtes spécialisées
+    
+    MÉTHODES:
+        create_user: Crée un utilisateur standard
+        create_superuser: Crée un administrateur
+    """
+    
+    def create_user(self, email, nom, prenom, telephone='', password=None, role='citoyen'):
+        """
+        Crée et sauvegarde un utilisateur.
         
+        PARAMÈTRES:
+            email: Email unique (obligatoire)
+            nom: Nom de famille (obligatoire)
+            prenom: Prénom (obligatoire)
+            telephone: Numéro de téléphone
+            password: Mot de passe (optionnel)
+            role: Rôle de l'utilisateur
+            
+        RETOURNE:
+            Instance Utilisateur créée
+            
+        LÈVE:
+            ValueError: Si email, nom ou prenom manquant
+        """
+        if not email:
+            raise ValueError("L'email est obligatoire")
+        if not nom:
+            raise ValueError("Le nom est obligatoire")
+        if not prenom:
+            raise ValueError("Le prénom est obligatoire")
+        
+        # Normaliser l'email
         email = self.normalize_email(email)
+        
+        # Créer l'utilisateur
         user = self.model(
-            email=email, 
-            nom=nom.strip().upper(), 
-            prenom=prenom.strip().title(), 
-            telephone=telephone, 
-            role=role
+            email=email,
+            nom=nom.strip().upper(),
+            prenom=prenom.strip().title(),
+            telephone=telephone,
+            role=role,
         )
-        user.set_password(password)
+        
+        # Définir le mot de passe
+        if password:
+            user.set_password(password)
+        
         user.save(using=self._db)
         return user
-
-    def create_superuser(self, email: str, nom: str, prenom: str, 
-                         telephone: str, password: str = None) -> 'Utilisateur':
-        user = self.create_user(email, nom, prenom, telephone, password, role='administrateur')
+    
+    def create_superuser(self, email, nom, prenom, telephone='', password=None):
+        """
+        Crée un superutilisateur (administrateur).
+        
+        PARAMÈTRES:
+            Mêmes que create_user
+            
+        RETOURNE:
+            Instance Utilisateur avec droits admin
+        """
+        user = self.create_user(
+            email=email,
+            nom=nom,
+            prenom=prenom,
+            telephone=telephone,
+            password=password,
+            role='administrateur'
+        )
+        
         user.is_staff = True
         user.is_superuser = True
         user.save(using=self._db)
         return user
     
     def agents_actifs(self):
-        """Retourne uniquement les agents actifs."""
+        """Retourne les agents actifs."""
         return self.filter(role='agent', is_active=True)
     
-    def citoyens_inscrits(self):
+    def citoyens_inscrits_mois(self):
         """Retourne les citoyens inscrits ce mois."""
+        from datetime import datetime
+        now = datetime.now()
         return self.filter(
-            role='citoyen', 
-            created_at__month=timezone.now().month,
-            created_at__year=timezone.now().year
+            role='citoyen',
+            created_at__month=now.month,
+            created_at__year=now.year
         )
 
 
-class Utilisateur(AbstractBaseUser, PermissionsMixin, TimestampMixin):
-    """Modèle utilisateur personnalisé avec authentification par email."""
+# ============================================================================
+# MODÈLE UTILISATEUR
+# ============================================================================
+
+class Utilisateur(AbstractBaseUser, PermissionsMixin):
+    """
+    Modèle utilisateur personnalisé avec authentification par email.
     
-    class Role(models.TextChoices):
-        CITOYEN = 'citoyen', 'Citoyen'
-        AGENT = 'agent', 'Agent administratif'
-        ADMINISTRATEUR = 'administrateur', 'Administrateur'
-
-    id = models.AutoField(primary_key=True)
-    nom = models.CharField(max_length=100)
-    prenom = models.CharField(max_length=100)
-    email = models.EmailField(max_length=100, unique=True)
-    telephone = models.CharField(max_length=20, blank=True, null=True)
-    role = models.CharField(max_length=20, choices=Role.choices)
-    is_active = models.BooleanField(default=True)
-    is_staff = models.BooleanField(default=False)
-    last_login = models.DateTimeField(null=True, blank=True)
-
+    CHAMPS:
+        - Identification: id, email
+        - Authentification: password, last_login
+        - Profil: nom, prenom, telephone, role
+        - Statut: is_active, is_staff, is_superuser
+        - OAuth: auth_provider, social_id, avatar_url
+        - Timestamps: created_at, updated_at
+    
+    CONTRAINTES:
+        - Email unique
+        - Role dans ['citoyen', 'agent', 'administrateur']
+    
+    EXEMPLE:
+        >>> user = Utilisateur.objects.create_user(
+        ...     email='test@example.com',
+        ...     nom='DIOP',
+        ...     prenom='Amadou'
+        ... )
+    """
+    
+    # -------------------------------------------------------------------------
+    # CHOIX PRÉDÉFINIS
+    # -------------------------------------------------------------------------
+    
+    ROLE_CHOICES = [
+        ('citoyen', 'Citoyen'),
+        ('agent', 'Agent administratif'),
+        ('administrateur', 'Administrateur'),
+    ]
+    
+    AUTH_PROVIDER_CHOICES = [
+        ('', 'Standard'),
+        ('google', 'Google'),
+        ('facebook', 'Facebook'),
+    ]
+    
+    # -------------------------------------------------------------------------
+    # CHAMPS D'IDENTIFICATION
+    # -------------------------------------------------------------------------
+    
+    id = models.AutoField(
+        primary_key=True,
+        verbose_name="ID"
+    )
+    
+    email = models.EmailField(
+        max_length=100,
+        unique=True,
+        verbose_name="Email",
+        validators=[EmailValidator()],
+        error_messages={
+            'unique': "Cet email est déjà utilisé."
+        }
+    )
+    
+    # -------------------------------------------------------------------------
+    # CHAMPS DE PROFIL
+    # -------------------------------------------------------------------------
+    
+    nom = models.CharField(
+        max_length=100,
+        verbose_name="Nom"
+    )
+    
+    prenom = models.CharField(
+        max_length=100,
+        verbose_name="Prénom"
+    )
+    
+    telephone = models.CharField(
+        max_length=20,
+        blank=True,
+        verbose_name="Téléphone"
+    )
+    
+    # -------------------------------------------------------------------------
+    # CHAMPS DE RÔLE ET PERMISSIONS
+    # -------------------------------------------------------------------------
+    
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES,
+        default='citoyen',
+        verbose_name="Rôle"
+    )
+    
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="Actif"
+    )
+    
+    is_staff = models.BooleanField(
+        default=False,
+        verbose_name="Staff"
+    )
+    
+    # -------------------------------------------------------------------------
+    # CHAMPS OAUTH
+    # -------------------------------------------------------------------------
+    
+    auth_provider = models.CharField(
+        max_length=20,
+        choices=AUTH_PROVIDER_CHOICES,
+        blank=True,
+        default='',
+        verbose_name="Provider OAuth"
+    )
+    
+    social_id = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name="ID Social"
+    )
+    
+    avatar_url = models.URLField(
+        blank=True,
+        null=True,
+        verbose_name="URL Avatar"
+    )
+    
+    # -------------------------------------------------------------------------
+    # TIMESTAMPS
+    # -------------------------------------------------------------------------
+    
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Date de création"
+    )
+    
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Date de modification"
+    )
+    
+    last_login = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Dernière connexion"
+    )
+    
+    # -------------------------------------------------------------------------
+    # CONFIGURATION DJANGO AUTH
+    # -------------------------------------------------------------------------
+    
     objects = UtilisateurManager()
-
+    
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['nom', 'prenom', 'telephone']
-
+    
+    # -------------------------------------------------------------------------
+    # MÉTADONNÉES
+    # -------------------------------------------------------------------------
+    
     class Meta:
         db_table = 'utilisateurs'
         ordering = ['-created_at']
-
-    def __str__(self) -> str:
+        verbose_name = 'Utilisateur'
+        verbose_name_plural = 'Utilisateurs'
+    
+    # -------------------------------------------------------------------------
+    # MÉTHODES
+    # -------------------------------------------------------------------------
+    
+    def __str__(self):
+        """Représentation string de l'utilisateur."""
         return f"{self.prenom} {self.nom} ({self.get_role_display()})"
     
-    def __repr__(self) -> str:
+    def __repr__(self):
+        """Représentation détaillée."""
         return f"<Utilisateur: {self.email} - {self.role}>"
     
     @property
-    def nom_complet(self) -> str:
+    def nom_complet(self):
         """Retourne le nom complet formaté."""
-        return f"{self.prenom} {self.nom}"
+        return f"{self.prenom} {self.nom}".strip()
     
     @property
-    def is_citoyen(self) -> bool:
-        return self.role == self.Role.CITOYEN
+    def is_citoyen(self):
+        """Vérifie si l'utilisateur est un citoyen."""
+        return self.role == 'citoyen'
     
     @property
-    def is_agent(self) -> bool:
-        return self.role == self.Role.AGENT
+    def is_agent(self):
+        """Vérifie si l'utilisateur est un agent."""
+        return self.role == 'agent'
     
     @property
-    def is_admin(self) -> bool:
-        return self.role == self.Role.ADMINISTRATEUR
+    def is_admin(self):
+        """Vérifie si l'utilisateur est un administrateur."""
+        return self.role == 'administrateur'
     
     def clean(self):
         """Validation personnalisée."""
         super().clean()
         if self.email:
             self.email = self.email.lower().strip()
-        if self.telephone:
-            self.telephone = self.telephone.strip()
     
     def save(self, *args, **kwargs):
+        """Sauvegarde avec validation."""
         self.full_clean()
         super().save(*args, **kwargs)
     
-    def marquer_notifications_lues(self):
-        """Marque toutes les notifications comme lues."""
-        self.notifications.filter(lu=False).update(lu=True)
+    def get_profile(self):
+        """
+        Retourne le profil associé selon le rôle.
+        
+        RETOURNE:
+            Citoyen, Agent ou Administrateur selon le rôle
+        """
+        if self.is_citoyen:
+            return getattr(self, 'citoyen_profile', None)
+        elif self.is_agent:
+            return getattr(self, 'agent_profile', None)
+        elif self.is_admin:
+            return getattr(self, 'admin_profile', None)
+        return None
     
-    def nombre_notifications_non_lues(self) -> int:
-        return self.notifications.filter(lu=False).count()
+    def deactivate(self):
+        """Désactive le compte."""
+        self.is_active = False
+        self.save(update_fields=['is_active', 'updated_at'])
+    
+    def activate(self):
+        """Active le compte."""
+        self.is_active = True
+        self.save(update_fields=['is_active', 'updated_at'])
 
 
-class ProfilMixin(models.Model):
-    """Mixin abstrait pour les profils liés à un utilisateur."""
+# ============================================================================
+# MODÈLES DE PROFIL
+# ============================================================================
+
+class Citoyen(models.Model):
+    """
+    Profil spécifique d'un citoyen.
+    
+    RELATION: One-to-One avec Utilisateur
+    
+    CHAMPS:
+        - utilisateur: Lien vers Utilisateur
+        - Informations personnelles: date_naissance, lieu_naissance, cni_numero
+        - Adresse: adresse, ville, code_postal
+    """
+    
     utilisateur = models.OneToOneField(
-        Utilisateur, 
+        Utilisateur,
         on_delete=models.CASCADE,
-        related_name='%(class)s_profile'
+        related_name='citoyen_profile',
+        primary_key=True
     )
-
-    class Meta:
-        abstract = True
     
-    @property
-    def email(self) -> str:
-        return self.utilisateur.email
+    # Informations personnelles
+    date_naissance = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="Date de naissance"
+    )
     
-    @property
-    def nom_complet(self) -> str:
-        return self.utilisateur.nom_complet
+    lieu_naissance = models.CharField(
+        max_length=100,
+        blank=True,
+        verbose_name="Lieu de naissance"
+    )
     
-    @property
-    def telephone(self) -> str:
-        return self.utilisateur.telephone
-
-
-class Citoyen(ProfilMixin, TimestampMixin):
-    """Profil citoyen avec fonctionnalités spécifiques."""
+    cni_numero = models.CharField(
+        max_length=50,
+        blank=True,
+        verbose_name="Numéro CNI"
+    )
     
-    id = models.AutoField(primary_key=True)
-    cin = models.CharField(max_length=20, unique=True, null=True, blank=True)
-    adresse = models.TextField(null=True, blank=True)
-
+    # Adresse
+    adresse = models.TextField(
+        blank=True,
+        verbose_name="Adresse"
+    )
+    
+    ville = models.CharField(
+        max_length=100,
+        blank=True,
+        verbose_name="Ville"
+    )
+    
+    code_postal = models.CharField(
+        max_length=10,
+        blank=True,
+        verbose_name="Code postal"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
         db_table = 'citoyens'
-
-    def __str__(self) -> str:
-        return f"Citoyen: {self.nom_complet}"
+        verbose_name = 'Citoyen'
+        verbose_name_plural = 'Citoyens'
     
-    def __repr__(self) -> str:
-        return f"<Citoyen: {self.cin or 'N/A'} - {self.utilisateur.email}>"
-    
-    def creer_demande(self, type_demande: str, service=None) -> 'DemandeAdministrative':
-        """Crée une nouvelle demande administrative."""
-        with transaction.atomic():
-            demande = DemandeAdministrative.objects.create(
-                citoyen=self,
-                type_demande=type_demande,
-                service=service
-            )
-            return demande
-    
-    def nombre_demandes_en_cours(self) -> int:
-        return self.demandes.filter(
-            statut__in=[DemandeAdministrative.Statut.EN_ATTENTE, DemandeAdministrative.Statut.EN_COURS]
-        ).count()
-    
-    def demandes_recentes(self, limite: int = 5):
-        return self.demandes.order_by('-date_demande')[:limite]
-    
-    def a_rendez_vous_confirme(self) -> bool:
-        return self.rendez_vous.filter(statut=RendezVous.Statut.CONFIRME).exists()
+    def __str__(self):
+        return f"Profil citoyen: {self.utilisateur.nom_complet}"
 
 
-class AgentAdministratif(ProfilMixin, TimestampMixin):
-    """Profil agent administratif avec méthodes métier."""
+class Agent(models.Model):
+    """
+    Profil spécifique d'un agent administratif.
     
-    id = models.AutoField(primary_key=True)
-    matricule = models.CharField(max_length=50, null=True, blank=True, unique=True)
-    service_affecte = models.CharField(max_length=100, null=True, blank=True)
-
+    RELATION: One-to-One avec Utilisateur
+    
+    CHAMPS:
+        - utilisateur: Lien vers Utilisateur
+        - Service: service assigné
+        - Informations professionnelles: matricule, date_embauche
+        - Disponibilité: est_disponible, charge_actuelle
+    """
+    
+    utilisateur = models.OneToOneField(
+        Utilisateur,
+        on_delete=models.CASCADE,
+        related_name='agent_profile',
+        primary_key=True
+    )
+    
+    # Service assigné (optionnel)
+    service = models.ForeignKey(
+        'Service',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='agents'
+    )
+    
+    # Informations professionnelles
+    matricule = models.CharField(
+        max_length=50,
+        blank=True,
+        verbose_name="Matricule"
+    )
+    
+    date_embauche = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="Date d'embauche"
+    )
+    
+    # Disponibilité
+    est_disponible = models.BooleanField(
+        default=True,
+        verbose_name="Disponible"
+    )
+    
+    charge_actuelle = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Charge actuelle"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
         db_table = 'agents'
-
-    def __str__(self) -> str:
-        return f"Agent: {self.nom_complet}"
+        verbose_name = 'Agent'
+        verbose_name_plural = 'Agents'
     
-    def __repr__(self) -> str:
-        return f"<Agent: {self.matricule or 'N/A'} - {self.service_affecte}>"
+    def __str__(self):
+        return f"Agent: {self.utilisateur.nom_complet}"
     
-    def traiter_demande(self, demande: 'DemandeAdministrative', 
-                        nouveau_statut: str, commentaire: str = None) -> 'Traitement':
-        """Traite une demande et met à jour son statut."""
-        with transaction.atomic():
-            traitement = Traitement.objects.create(
-                demande=demande,
-                agent=self,
-                commentaire=commentaire,
-                statut_apres_traitement=nouveau_statut
-            )
-            demande.statut = nouveau_statut
-            demande.save()
-            return traitement
+    def incrementer_charge(self):
+        """Incrémente la charge de travail."""
+        self.charge_actuelle += 1
+        self.save(update_fields=['charge_actuelle', 'updated_at'])
     
-    def proposer_rendez_vous(self, demande: 'DemandeAdministrative', 
-                             date, heure, lieu: str = None) -> 'PropositionRDV':
-        """Propose un créneau de rendez-vous."""
-        return PropositionRDV.objects.create(
-            demande=demande,
-            agent=self,
-            date=date,
-            heure=heure,
-            lieu=lieu
-        )
-    
-    @classmethod
-    def statistiques_traitements(cls):
-        """Retourne les statistiques de traitement par agent."""
-        return cls.objects.annotate(
-            total_traitements=Count('traitements'),
-            validations=Count('traitements', filter=Q(traitements__statut_apres_traitement='validee')),
-            rejets=Count('traitements', filter=Q(traitements__statut_apres_traitement='rejetee'))
-        )
+    def decrementer_charge(self):
+        """Décrémente la charge de travail."""
+        if self.charge_actuelle > 0:
+            self.charge_actuelle -= 1
+            self.save(update_fields=['charge_actuelle', 'updated_at'])
 
 
-class ServiceAdministratif(TimestampMixin):
-    """Service administratif disponible."""
+class Administrateur(models.Model):
+    """
+    Profil spécifique d'un administrateur.
     
-    id = models.AutoField(primary_key=True)
-    nom_service = models.CharField(max_length=100)
-    description = models.TextField(null=True, blank=True)
-    delai_traitement = models.IntegerField(help_text="Délai en jours", null=True, blank=True)
-    actif = models.BooleanField(default=True)
-
+    RELATION: One-to-One avec Utilisateur
+    """
+    
+    utilisateur = models.OneToOneField(
+        Utilisateur,
+        on_delete=models.CASCADE,
+        related_name='admin_profile',
+        primary_key=True
+    )
+    
+    niveau_admin = models.CharField(
+        max_length=20,
+        choices=[
+            ('super', 'Super Admin'),
+            ('standard', 'Admin Standard'),
+        ],
+        default='standard',
+        verbose_name="Niveau"
+    )
+    
+    notes = models.TextField(
+        blank=True,
+        verbose_name="Notes"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
-        db_table = 'services_administratifs'
-        ordering = ['nom_service']
-
-    def __str__(self) -> str:
-        return self.nom_service
+        db_table = 'administrateurs'
+        verbose_name = 'Administrateur'
+        verbose_name_plural = 'Administrateurs'
     
-    def __repr__(self) -> str:
-        return f"<Service: {self.nom_service}>"
+    def __str__(self):
+        return f"Admin: {self.utilisateur.nom_complet}"
+
+
+# ============================================================================
+# MODÈLES MÉTIER: SERVICES ET DEMANDES
+# ============================================================================
+
+class Service(models.Model):
+    """
+    Service administratif proposé aux citoyens.
     
-    @property
-    def nombre_demandes_actives(self) -> int:
-        return self.demandes.exclude(
-            statut__in=[DemandeAdministrative.Statut.VALIDEE, DemandeAdministrative.Statut.REJETEE]
-        ).count()
-
-
-class DemandeAdministrative(TimestampMixin):
-    """Demande administrative avec workflow complet."""
+    EXEMPLES:
+        - État Civil (actes de naissance, mariage, décès)
+        - Urbanisme (permis de construire)
+        - Finances (paiement taxes)
     
-    class Type(models.TextChoices):
-        CARTE_IDENTITE = 'carte_identite', 'Carte d\'identité'
-        PASSEPORT = 'passeport', 'Passeport'
-        ACTE_NAISSANCE = 'acte_naissance', 'Acte de naissance'
-        ACTE_MARIAGE = 'acte_mariage', 'Acte de mariage'
-        AUTRE = 'autre', 'Autre'
-
-    class Statut(models.TextChoices):
-        EN_ATTENTE = 'en_attente', 'En attente'
-        EN_COURS = 'en_cours', 'En cours'
-        VALIDEE = 'validee', 'Validée'
-        REJETEE = 'rejetee', 'Rejetée'
-
+    CHAMPS:
+        - nom, description
+        - delai_traitement_jours: SLA
+        - documents_requis: liste des documents nécessaires
+        - est_actif: visibilité
+    """
+    
     id = models.AutoField(primary_key=True)
-    id_demande = models.CharField(max_length=20, unique=True, null=True, blank=True)
-    citoyen = models.ForeignKey(Citoyen, on_delete=models.CASCADE, related_name='demandes')
+    
+    nom = models.CharField(
+        max_length=200,
+        verbose_name="Nom du service"
+    )
+    
+    description = models.TextField(
+        blank=True,
+        verbose_name="Description"
+    )
+    
+    delai_traitement_jours = models.PositiveIntegerField(
+        default=7,
+        verbose_name="Délai de traitement (jours)"
+    )
+    
+    documents_requis = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name="Documents requis"
+    )
+    
+    est_actif = models.BooleanField(
+        default=True,
+        verbose_name="Actif"
+    )
+    
+    ordre_affichage = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Ordre d'affichage"
+    )
+    
+    tarif = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name="Tarif"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'services'
+        ordering = ['ordre_affichage', 'nom']
+        verbose_name = 'Service'
+        verbose_name_plural = 'Services'
+    
+    def __str__(self):
+        return self.nom
+
+
+class Demande(models.Model):
+    """
+    Demande administrative soumise par un citoyen.
+    
+    WORKFLOW DES STATUTS:
+        brouillon → soumise → en_traitement → [traitee | rejetee] → archivee
+                        ↓
+                    en_attente (documents manquants)
+    
+    CHAMPS CLÉS:
+        - numero_reference: Référence unique (ex: DEM-2024-000123)
+        - citoyen: Demandeur
+        - service: Service concerné
+        - agent: Agent assigné (nullable)
+        - status: Statut actuel
+        - historique_statut: JSON avec historique des changements
+    """
+    
+    # Statuts possibles
+    STATUS_CHOICES = [
+        ('brouillon', 'Brouillon'),
+        ('soumise', 'Soumise'),
+        ('en_traitement', 'En traitement'),
+        ('en_attente', 'En attente documents'),
+        ('traitee', 'Traitée'),
+        ('rejetee', 'Rejetée'),
+        ('archivee', 'Archivée'),
+    ]
+    
+    # Priorités
+    PRIORITE_CHOICES = [
+        ('basse', 'Basse'),
+        ('normal', 'Normale'),
+        ('haute', 'Haute'),
+        ('urgente', 'Urgente'),
+    ]
+    
+    id = models.AutoField(primary_key=True)
+    
+    # Référence unique
+    numero_reference = models.CharField(
+        max_length=50,
+        unique=True,
+        verbose_name="Référence"
+    )
+    
+    # Relations
+    citoyen = models.ForeignKey(
+        Utilisateur,
+        on_delete=models.CASCADE,
+        related_name='demandes',
+        limit_choices_to={'role': 'citoyen'}
+    )
+    
     service = models.ForeignKey(
-        ServiceAdministratif, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
+        Service,
+        on_delete=models.CASCADE,
         related_name='demandes'
     )
-    type_demande = models.CharField(max_length=100, choices=Type.choices)
-    statut = models.CharField(max_length=20, choices=Statut.choices, default=Statut.EN_ATTENTE)
-    motif_rejet = models.TextField(null=True, blank=True)
-    date_demande = models.DateTimeField(default=timezone.now)
-
+    
+    agent = models.ForeignKey(
+        Utilisateur,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='demandes_assignees',
+        limit_choices_to={'role': 'agent'}
+    )
+    
+    # Contenu
+    titre = models.CharField(
+        max_length=200,
+        verbose_name="Titre"
+    )
+    
+    description = models.TextField(
+        verbose_name="Description"
+    )
+    
+    type_document = models.CharField(
+        max_length=50,
+        verbose_name="Type de document"
+    )
+    
+    # Statut et workflow
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='brouillon',
+        verbose_name="Statut"
+    )
+    
+    historique_statut = models.JSONField(
+        default=list,
+        verbose_name="Historique des statuts"
+    )
+    
+    # Priorité
+    priorite = models.CharField(
+        max_length=10,
+        choices=PRIORITE_CHOICES,
+        default='normal',
+        verbose_name="Priorité"
+    )
+    
+    # Dates importantes
+    date_soumission = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date de soumission"
+    )
+    
+    date_debut_traitement = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Début traitement"
+    )
+    
+    date_cloture = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date de clôture"
+    )
+    
+    date_echeance = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date d'échéance"
+    )
+    
+    # Compléments
+    notes_internes = models.TextField(
+        blank=True,
+        verbose_name="Notes internes"
+    )
+    
+    motif_rejet = models.TextField(
+        blank=True,
+        verbose_name="Motif de rejet"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
         db_table = 'demandes'
-        ordering = ['-date_demande']
-
-    def __str__(self) -> str:
-        return f"Demande #{self.id_demande or self.id} - {self.get_type_demande_display()}"
+        ordering = ['-created_at']
+        verbose_name = 'Demande'
+        verbose_name_plural = 'Demandes'
     
-    def __repr__(self) -> str:
-        return f"<Demande: {self.id} - {self.citoyen.nom_complet}>"
+    def __str__(self):
+        return f"{self.numero_reference} - {self.titre}"
     
     def save(self, *args, **kwargs):
-        if not self.id_demande:
-            self.id_demande = self._generer_id()
+        """Génère la référence si nouvelle demande."""
+        if not self.numero_reference:
+            self.numero_reference = self._generer_reference()
         super().save(*args, **kwargs)
     
-    def _generer_id(self) -> str:
-        """Génère un ID unique pour la demande."""
-        import random
-        import string
-        prefix = self.type_demande[:3].upper()
-        suffix = ''.join(random.choices(string.digits, k=6))
-        return f"{prefix}-{suffix}"
+    def _generer_reference(self):
+        """Génère une référence unique."""
+        from datetime import datetime
+        now = datetime.now()
+        count = Demande.objects.filter(
+            created_at__year=now.year
+        ).count() + 1
+        return f"DEM-{now.year}-{count:06d}"
     
     @property
-    def est_en_attente(self) -> bool:
-        return self.statut == self.Statut.EN_ATTENTE
+    def is_overdue(self):
+        """Vérifie si la demande dépasse l'échéance."""
+        if self.date_echeance and self.status not in ['traitee', 'rejetee', 'archivee']:
+            return timezone.now() > self.date_echeance
+        return False
     
     @property
-    def est_validee(self) -> bool:
-        return self.statut == self.Statut.VALIDEE
+    def duree_traitement(self):
+        """Calcule la durée de traitement en jours."""
+        if self.date_debut_traitement and self.date_cloture:
+            return (self.date_cloture - self.date_debut_traitement).days
+        if self.date_debut_traitement:
+            return (timezone.now() - self.date_debut_traitement).days
+        return None
     
-    @property
-    def est_rejetee(self) -> bool:
-        return self.statut == self.Statut.REJETEE
-    
-    def changer_statut(self, nouveau_statut: str, motif: str = None):
-        """Change le statut avec validation."""
-        if nouveau_statut not in [s[0] for s in self.Statut.choices]:
-            raise ValidationError("Statut invalide")
+    def changer_statut(self, nouveau_statut, modifie_par=None, raison=None):
+        """
+        Change le statut avec traçabilité.
         
-        ancien_statut = self.statut
-        self.statut = nouveau_statut
+        PARAMÈTRES:
+            nouveau_statut: Nouveau statut
+            modifie_par: ID de l'utilisateur modifiant
+            raison: Raison du changement
+        """
+        ancien_statut = self.status
         
-        if nouveau_statut == self.Statut.REJETEE and motif:
-            self.motif_rejet = motif
+        # Enregistrer dans l'historique
+        self.historique_statut.append({
+            'from': ancien_statut,
+            'to': nouveau_statut,
+            'at': timezone.now().isoformat(),
+            'by': modifie_par,
+            'reason': raison
+        })
         
-        self.save()
-        
-        # Créer une notification
-        Notification.objects.create(
-            utilisateur=self.citoyen.utilisateur,
-            type_notification='changement_statut',
-            message=f"Votre demande {self.id_demande} est passée de '{ancien_statut}' à '{nouveau_statut}'"
-        )
-    
-    def obtenir_documents(self):
-        return self.documents.all()
-    
-    @classmethod
-    def statistiques_par_statut(cls):
-        """Statistiques des demandes par statut."""
-        return cls.objects.values('statut').annotate(total=Count('id'))
+        self.status = nouveau_statut
+        self.save(update_fields=['status', 'historique_statut', 'updated_at'])
 
 
-class Document(TimestampMixin):
-    """Document associé à une demande."""
-    
-    class Type(models.TextChoices):
-        PDF = 'pdf', 'PDF'
-        IMAGE = 'image', 'Image'
-        DOC = 'doc', 'Document'
-        AUTRE = 'autre', 'Autre'
+# ============================================================================
+# MODÈLES MÉTIER: DOCUMENTS
+# ============================================================================
 
+class Document(models.Model):
+    """
+    Document attaché à une demande administrative.
+    
+    TYPES:
+        - piece_identite: CNI, passeport
+        - justificatif: Facture, contrat
+        - formulaire: Formulaire administratif
+        - attestation: Attestation officielle
+    """
+    
+    TYPE_CHOICES = [
+        ('piece_identite', 'Pièce d\'identité'),
+        ('justificatif', 'Justificatif'),
+        ('formulaire', 'Formulaire'),
+        ('attestation', 'Attestation'),
+        ('autre', 'Autre'),
+    ]
+    
     id = models.AutoField(primary_key=True)
-    id_document = models.CharField(max_length=20, unique=True, null=True, blank=True)
+    
     demande = models.ForeignKey(
-        DemandeAdministrative, 
-        on_delete=models.CASCADE, 
+        Demande,
+        on_delete=models.CASCADE,
         related_name='documents'
     )
-    nom_document = models.CharField(max_length=255)
-    type_document = models.CharField(max_length=50, choices=Type.choices, default=Type.AUTRE)
-    fichier = models.FileField(upload_to='documents/%Y/%m/', null=True, blank=True)
-    url = models.URLField(null=True, blank=True)
-    date_upload = models.DateTimeField(default=timezone.now)
-
+    
+    uploade_par = models.ForeignKey(
+        Utilisateur,
+        on_delete=models.CASCADE,
+        related_name='documents_uploades'
+    )
+    
+    # Fichier
+    fichier = models.FileField(
+        upload_to='documents/%Y/%m/',
+        verbose_name="Fichier"
+    )
+    
+    fichier_nom = models.CharField(
+        max_length=255,
+        verbose_name="Nom original"
+    )
+    
+    fichier_type = models.CharField(
+        max_length=100,
+        verbose_name="Type MIME"
+    )
+    
+    fichier_taille = models.PositiveIntegerField(
+        verbose_name="Taille (octets)"
+    )
+    
+    # Métadonnées
+    type_document = models.CharField(
+        max_length=50,
+        choices=TYPE_CHOICES,
+        verbose_name="Type de document"
+    )
+    
+    description = models.TextField(
+        blank=True,
+        verbose_name="Description"
+    )
+    
+    est_verifie = models.BooleanField(
+        default=False,
+        verbose_name="Vérifié"
+    )
+    
+    verifie_par = models.ForeignKey(
+        Utilisateur,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='documents_verifies'
+    )
+    
+    date_verification = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date de vérification"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
         db_table = 'documents'
-        ordering = ['-date_upload']
-
-    def __str__(self) -> str:
-        return self.nom_document
+        ordering = ['-created_at']
+        verbose_name = 'Document'
+        verbose_name_plural = 'Documents'
     
-    def __repr__(self) -> str:
-        return f"<Document: {self.nom_document} - {self.type_document}>"
-    
-    def save(self, *args, **kwargs):
-        if not self.id_document:
-            self.id_document = f"DOC-{self.demande.id}-{timezone.now().strftime('%Y%m%d%H%M%S')}"
-        
-        # Déterminer le type à partir de l'extension
-        if self.fichier and not self.type_document:
-            ext = os.path.splitext(self.fichier.name)[1].lower()
-            if ext in ['.pdf']:
-                self.type_document = self.Type.PDF
-            elif ext in ['.jpg', '.jpeg', '.png', '.gif']:
-                self.type_document = self.Type.IMAGE
-            elif ext in ['.doc', '.docx']:
-                self.type_document = self.Type.DOC
-        
-        super().save(*args, **kwargs)
-    
-    def supprimer_fichier(self):
-        """Supprime le fichier physique et l'entrée en base."""
-        if self.fichier and os.path.isfile(self.fichier.path):
-            os.remove(self.fichier.path)
-        self.delete()
+    def __str__(self):
+        return f"{self.fichier_nom} ({self.get_type_document_display()})"
     
     @property
-    def taille_fichier(self) -> int:
-        if self.fichier and os.path.exists(self.fichier.path):
-            return os.path.getsize(self.fichier.path)
-        return 0
-
-
-class Traitement(TimestampMixin):
-    """Traitement d'une demande par un agent."""
+    def taille_readable(self):
+        """Retourne la taille lisible (Ko, Mo)."""
+        if self.fichier_taille < 1024:
+            return f"{self.fichier_taille} o"
+        elif self.fichier_taille < 1024 * 1024:
+            return f"{self.fichier_taille / 1024:.1f} Ko"
+        else:
+            return f"{self.fichier_taille / (1024 * 1024):.1f} Mo"
     
-    class Statut(models.TextChoices):
-        EN_ATTENTE = 'en_attente', 'En attente'
-        EN_COURS = 'en_cours', 'En cours'
-        VALIDEE = 'validee', 'Validée'
-        REJETEE = 'rejetee', 'Rejetée'
+    def marquer_verifie(self, agent):
+        """Marque le document comme vérifié."""
+        self.est_verifie = True
+        self.verifie_par = agent
+        self.date_verification = timezone.now()
+        self.save(update_fields=['est_verifie', 'verifie_par', 'date_verification'])
 
+
+# ============================================================================
+# MODÈLES MÉTIER: TRAITEMENT (HISTORIQUE)
+# ============================================================================
+
+class Traitement(models.Model):
+    """
+    Action effectuée sur une demande (historique).
+    
+    ACTIONS POSSIBLES:
+        - creation: Création de la demande
+        - verification: Vérification des documents
+        - assignation: Assignation à un agent
+        - changement_statut: Changement de statut
+        - commentaire: Ajout de commentaire
+    """
+    
+    ACTION_CHOICES = [
+        ('creation', 'Création'),
+        ('verification', 'Vérification'),
+        ('assignation', 'Assignation'),
+        ('changement_statut', 'Changement de statut'),
+        ('commentaire', 'Commentaire'),
+        ('upload_document', 'Upload document'),
+    ]
+    
     id = models.AutoField(primary_key=True)
+    
     demande = models.ForeignKey(
-        DemandeAdministrative, 
-        on_delete=models.CASCADE, 
+        Demande,
+        on_delete=models.CASCADE,
         related_name='traitements'
     )
+    
     agent = models.ForeignKey(
-        AgentAdministratif, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
-        related_name='traitements'
+        Utilisateur,
+        on_delete=models.CASCADE,
+        related_name='traitements_effectues',
+        limit_choices_to={'role__in': ['agent', 'administrateur']}
     )
-    commentaire = models.TextField(null=True, blank=True)
-    statut_apres_traitement = models.CharField(max_length=20, choices=Statut.choices, null=True, blank=True)
-    date_traitement = models.DateTimeField(default=timezone.now)
-
+    
+    action = models.CharField(
+        max_length=50,
+        choices=ACTION_CHOICES,
+        verbose_name="Action"
+    )
+    
+    statut_precedent = models.CharField(
+        max_length=20,
+        blank=True,
+        verbose_name="Statut précédent"
+    )
+    
+    nouveau_statut = models.CharField(
+        max_length=20,
+        blank=True,
+        verbose_name="Nouveau statut"
+    )
+    
+    commentaire = models.TextField(
+        blank=True,
+        verbose_name="Commentaire"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
     class Meta:
         db_table = 'traitements'
-        ordering = ['-date_traitement']
-
-    def __str__(self) -> str:
-        return f"Traitement #{self.id} - {self.demande.id_demande}"
+        ordering = ['-created_at']
+        verbose_name = 'Traitement'
+        verbose_name_plural = 'Traitements'
     
-    def __repr__(self) -> str:
-        return f"<Traitement: {self.id} - Agent: {self.agent}>"
+    def __str__(self):
+        return f"{self.action} sur {self.demande.numero_reference}"
 
 
-class PropositionRDV(TimestampMixin):
-    """Proposition de créneau rendez-vous."""
+# ============================================================================
+# MODÈLES MÉTIER: RENDEZ-VOUS
+# ============================================================================
+
+class RendezVous(models.Model):
+    """
+    Rendez-vous entre un citoyen et un agent.
     
-    class Statut(models.TextChoices):
-        PROPOSE = 'propose', 'Proposé'
-        CHOISI = 'choisi', 'Choisi'
-        REFUSE = 'refuse', 'Refusé'
-        EXPIRE = 'expire', 'Expiré'
-
+    WORKFLOW:
+        propose → confirme → realise
+            ↓
+        annule
+    """
+    
+    STATUS_CHOICES = [
+        ('propose', 'Proposé'),
+        ('confirme', 'Confirmé'),
+        ('realise', 'Réalisé'),
+        ('annule', 'Annulé'),
+        ('non_honore', 'Non honoré'),
+    ]
+    
     id = models.AutoField(primary_key=True)
+    
     demande = models.ForeignKey(
-        DemandeAdministrative, 
-        on_delete=models.CASCADE, 
-        related_name='propositions_rdv'
-    )
-    agent = models.ForeignKey(
-        AgentAdministratif, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
-        related_name='propositions_rdv'
-    )
-    date = models.DateField()
-    heure = models.TimeField()
-    lieu = models.CharField(max_length=255, null=True, blank=True)
-    statut = models.CharField(max_length=20, choices=Statut.choices, default=Statut.PROPOSE)
-
-    class Meta:
-        db_table = 'propositions_rdv'
-        verbose_name = 'Proposition RDV'
-        verbose_name_plural = 'Propositions RDV'
-        ordering = ['date', 'heure']
-
-    def __str__(self) -> str:
-        return f"RDV le {self.date} à {self.heure}"
-    
-    def __repr__(self) -> str:
-        return f"<PropositionRDV: {self.date} {self.heure} - {self.statut}>"
-    
-    @property
-    def datetime_complet(self):
-        from datetime import datetime
-        return datetime.combine(self.date, self.heure)
-    
-    def est_expire(self) -> bool:
-        """Vérifie si la proposition est expirée."""
-        from datetime import datetime
-        return self.datetime_complet < timezone.now()
-    
-    def marquer_choisi(self):
-        """Marque cette proposition comme choisie."""
-        with transaction.atomic():
-            self.statut = self.Statut.CHOISI
-            self.save()
-            
-            # Refuser les autres propositions
-            PropositionRDV.objects.filter(
-                demande=self.demande
-            ).exclude(id=self.id).update(statut=self.Statut.REFUSE)
-
-
-class RendezVous(TimestampMixin):
-    """Rendez-vous confirmé."""
-    
-    class Statut(models.TextChoices):
-        CONFIRME = 'confirme', 'Confirmé'
-        ANNULE = 'annule', 'Annulé'
-        TERMINE = 'termine', 'Terminé'
-
-    id = models.AutoField(primary_key=True)
-    id_rendez_vous = models.CharField(max_length=20, unique=True, null=True, blank=True)
-    proposition = models.OneToOneField(
-        PropositionRDV, 
-        on_delete=models.CASCADE, 
+        Demande,
+        on_delete=models.CASCADE,
         related_name='rendez_vous'
     )
+    
     citoyen = models.ForeignKey(
-        Citoyen, 
-        on_delete=models.CASCADE, 
-        related_name='rendez_vous'
+        Utilisateur,
+        on_delete=models.CASCADE,
+        related_name='rdv_citoyen',
+        limit_choices_to={'role': 'citoyen'}
     )
-    statut = models.CharField(max_length=20, choices=Statut.choices, default=Statut.CONFIRME)
-    date_confirmation = models.DateTimeField(default=timezone.now)
-
+    
+    agent = models.ForeignKey(
+        Utilisateur,
+        on_delete=models.CASCADE,
+        related_name='rdv_agent',
+        limit_choices_to={'role': 'agent'}
+    )
+    
+    # Date et heure
+    date_rdv = models.DateField(
+        verbose_name="Date du rendez-vous"
+    )
+    
+    heure_debut = models.TimeField(
+        verbose_name="Heure de début"
+    )
+    
+    heure_fin = models.TimeField(
+        verbose_name="Heure de fin"
+    )
+    
+    # Détails
+    lieu = models.CharField(
+        max_length=200,
+        verbose_name="Lieu"
+    )
+    
+    motif = models.TextField(
+        blank=True,
+        verbose_name="Motif"
+    )
+    
+    # Statut
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='propose',
+        verbose_name="Statut"
+    )
+    
+    # Dates importantes
+    date_confirmation = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date de confirmation"
+    )
+    
+    date_annulation = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date d'annulation"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
         db_table = 'rendez_vous'
+        ordering = ['date_rdv', 'heure_debut']
         verbose_name = 'Rendez-vous'
         verbose_name_plural = 'Rendez-vous'
-        ordering = ['-date_confirmation']
-
-    def __str__(self) -> str:
-        return f"RDV confirmé le {self.proposition.date}"
     
-    def __repr__(self) -> str:
-        return f"<RendezVous: {self.id_rendez_vous} - {self.statut}>"
+    def __str__(self):
+        return f"RDV {self.date_rdv} - {self.citoyen.nom_complet}"
     
-    def save(self, *args, **kwargs):
-        if not self.id_rendez_vous:
-            self.id_rendez_vous = f"RDV-{timezone.now().strftime('%Y%m%d%H%M%S')}-{self.citoyen.id}"
-        super().save(*args, **kwargs)
+    def confirmer(self):
+        """Confirme le rendez-vous."""
+        self.status = 'confirme'
+        self.date_confirmation = timezone.now()
+        self.save(update_fields=['status', 'date_confirmation'])
     
-    def annuler(self, raison: str = None):
+    def annuler(self):
         """Annule le rendez-vous."""
-        self.statut = self.Statut.ANNULE
-        self.save()
-        
-        # Notifier le citoyen
-        Notification.objects.create(
-            utilisateur=self.citoyen.utilisateur,
-            type_notification='rdv_confirme',
-            message=f"Votre rendez-vous du {self.proposition.date} a été annulé. {raison or ''}"
-        )
+        self.status = 'annule'
+        self.date_annulation = timezone.now()
+        self.save(update_fields=['status', 'date_annulation'])
     
-    def terminer(self):
-        """Marque le rendez-vous comme terminé."""
-        self.statut = self.Statut.TERMINE
-        self.save()
+    def marquer_realise(self):
+        """Marque le rendez-vous comme réalisé."""
+        self.status = 'realise'
+        self.save(update_fields=['status'])
 
 
-class Notification(TimestampMixin):
-    """Notification envoyée à un utilisateur."""
+# ============================================================================
+# MODÈLES MÉTIER: NOTIFICATIONS
+# ============================================================================
+
+class Notification(models.Model):
+    """
+    Notification envoyée à un utilisateur.
     
-    class Type(models.TextChoices):
-        CHANGEMENT_STATUT = 'changement_statut', 'Changement de statut'
-        DOSSIER_PRET = 'dossier_pret', 'Dossier prêt'
-        RDV_PROPOSE = 'rdv_propose', 'Rendez-vous proposé'
-        RDV_CONFIRME = 'rdv_confirme', 'Rendez-vous confirmé'
-        AUTRE = 'autre', 'Autre'
-
+    TYPES:
+        - info: Information générale
+        - success: Action réussie
+        - warning: Attention requise
+        - error: Erreur
+    
+    DESTINATAIRES:
+        - Citoyens: Sur événements de leurs demandes
+        - Agents: Sur nouvelles demandes assignées
+        - Admins: Sur alertes système
+    """
+    
+    TYPE_CHOICES = [
+        ('info', 'Information'),
+        ('success', 'Succès'),
+        ('warning', 'Avertissement'),
+        ('error', 'Erreur'),
+    ]
+    
     id = models.AutoField(primary_key=True)
-    utilisateur = models.ForeignKey(
-        Utilisateur, 
-        on_delete=models.CASCADE, 
+    
+    destinataire = models.ForeignKey(
+        Utilisateur,
+        on_delete=models.CASCADE,
         related_name='notifications'
     )
-    message = models.TextField()
-    type_notification = models.CharField(max_length=50, choices=Type.choices, default=Type.AUTRE)
-    lu = models.BooleanField(default=False)
-    date_envoi = models.DateTimeField(default=timezone.now)
-    date_lecture = models.DateTimeField(null=True, blank=True)
-
+    
+    # Contenu
+    type_notification = models.CharField(
+        max_length=20,
+        choices=TYPE_CHOICES,
+        default='info',
+        verbose_name="Type"
+    )
+    
+    titre = models.CharField(
+        max_length=200,
+        verbose_name="Titre"
+    )
+    
+    message = models.TextField(
+        verbose_name="Message"
+    )
+    
+    # Liens
+    demande = models.ForeignKey(
+        Demande,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='notifications'
+    )
+    
+    lien_action = models.URLField(
+        blank=True,
+        verbose_name="Lien d'action"
+    )
+    
+    # État
+    is_read = models.BooleanField(
+        default=False,
+        verbose_name="Lu"
+    )
+    
+    date_lecture = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Date de lecture"
+    )
+    
+    # Email envoyé?
+    email_envoye = models.BooleanField(
+        default=False,
+        verbose_name="Email envoyé"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    
     class Meta:
         db_table = 'notifications'
-        ordering = ['-date_envoi']
-
-    def __str__(self) -> str:
-        return f"Notification pour {self.utilisateur.nom_complet}: {self.message[:50]}..."
+        ordering = ['-created_at']
+        verbose_name = 'Notification'
+        verbose_name_plural = 'Notifications'
     
-    def __repr__(self) -> str:
-        return f"<Notification: {self.id} - {self.type_notification} - Lu: {self.lu}>"
+    def __str__(self):
+        return f"{self.titre} ({self.destinataire.email})"
     
     def marquer_lu(self):
         """Marque la notification comme lue."""
-        if not self.lu:
-            self.lu = True
-            self.date_lecture = timezone.now()
-            self.save(update_fields=['lu', 'date_lecture'])
+        self.is_read = True
+        self.date_lecture = timezone.now()
+        self.save(update_fields=['is_read', 'date_lecture'])
+
+
+# ============================================================================
+# MODÈLES MÉTIER: FAQ (CHATBOT)
+# ============================================================================
+
+class FAQ(models.Model):
+    """
+    Questions fréquentes pour le chatbot.
     
-    @classmethod
-    def envoyer_a_tous(cls, utilisateurs, message: str, type_notif: str = 'autre'):
-        """Envoie une notification à plusieurs utilisateurs."""
-        notifications = [
-            cls(utilisateur=u, message=message, type_notification=type_notif)
-            for u in utilisateurs
-        ]
-        return cls.objects.bulk_create(notifications)
-
-
-class Administrateur(ProfilMixin, TimestampMixin):
-    """Profil administrateur système."""
+    UTILISATION:
+        - Recherche par mots-clés
+        - Suggestions automatiques
+        - Statistiques d'utilisation
+    """
+    
+    CATEGORIE_CHOICES = [
+        ('general', 'Général'),
+        ('inscription', 'Inscription'),
+        ('demandes', 'Demandes'),
+        ('documents', 'Documents'),
+        ('rdv', 'Rendez-vous'),
+        ('technique', 'Problème technique'),
+    ]
     
     id = models.AutoField(primary_key=True)
-
+    
+    question = models.TextField(
+        verbose_name="Question"
+    )
+    
+    reponse = models.TextField(
+        verbose_name="Réponse"
+    )
+    
+    categorie = models.CharField(
+        max_length=50,
+        choices=CATEGORIE_CHOICES,
+        default='general',
+        verbose_name="Catégorie"
+    )
+    
+    mots_cles = models.JSONField(
+        default=list,
+        verbose_name="Mots-clés"
+    )
+    
+    compteur_utilisation = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Utilisations"
+    )
+    
+    est_actif = models.BooleanField(
+        default=True,
+        verbose_name="Actif"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
-        db_table = 'administrateurs'
-
-    def __str__(self) -> str:
-        return f"Admin: {self.nom_complet}"
+        db_table = 'faq'
+        ordering = ['categorie', 'question']
+        verbose_name = 'FAQ'
+        verbose_name_plural = 'FAQ'
     
-    def __repr__(self) -> str:
-        return f"<Administrateur: {self.utilisateur.email}>"
+    def __str__(self):
+        return f"{self.categorie}: {self.question[:50]}..."
     
-    def creer_agent(self, email: str, nom: str, prenom: str, 
-                    telephone: str, password: str, **kwargs) -> AgentAdministratif:
-        """Crée un nouvel agent."""
-        with transaction.atomic():
-            user = Utilisateur.objects.create_user(
-                email=email,
-                nom=nom,
-                prenom=prenom,
-                telephone=telephone,
-                password=password,
-                role=Utilisateur.Role.AGENT
-            )
-            return AgentAdministratif.objects.create(utilisateur=user, **kwargs)
-    
-    def desactiver_utilisateur(self, utilisateur_id: int):
-        """Désactive un compte utilisateur."""
-        user = Utilisateur.objects.get(id=utilisateur_id)
-        user.is_active = False
-        user.save()
-    
-    @classmethod
-    def statistiques_globales(cls):
-        """Retourne les statistiques globales du système."""
-        return {
-            'total_utilisateurs': Utilisateur.objects.count(),
-            'total_citoyens': Citoyen.objects.count(),
-            'total_agents': AgentAdministratif.objects.count(),
-            'demandes_en_attente': DemandeAdministrative.objects.filter(
-                statut=DemandeAdministrative.Statut.EN_ATTENTE
-            ).count(),
-            'demandes_validees': DemandeAdministrative.objects.filter(
-                statut=DemandeAdministrative.Statut.VALIDEE
-            ).count(),
-        }
+    def incrementer_utilisation(self):
+        """Incrémente le compteur d'utilisation."""
+        self.compteur_utilisation += 1
+        self.save(update_fields=['compteur_utilisation'])
 
 
-class FAQChatbot(TimestampMixin):
-    """FAQ pour le chatbot d'assistance."""
-    
-    id = models.AutoField(primary_key=True)
-    question = models.TextField()
-    reponse = models.TextField()
-    mots_cles = models.CharField(max_length=255, blank=True, help_text="Mots-clés séparés par des virgules")
-    categorie = models.CharField(max_length=100, blank=True)
-    ordre_affichage = models.PositiveIntegerField(default=0)
-    actif = models.BooleanField(default=True)
+# ============================================================================
+# FIN DES MODÈLES
+# ============================================================================
 
-    class Meta:
-        db_table = 'faq_chatbot'
-        ordering = ['ordre_affichage', 'question']
-        verbose_name = 'FAQ Chatbot'
-        verbose_name_plural = 'FAQs Chatbot'
+"""
+RÉSUMÉ DES RELATIONS:
 
-    def __str__(self) -> str:
-        return f"FAQ: {self.question[:50]}..."
-    
-    def __repr__(self) -> str:
-        return f"<FAQChatbot: {self.categorie} - {self.question[:30]}>"
-    
-    def get_mots_cles_list(self) -> list:
-        """Retourne la liste des mots-clés."""
-        return [mot.strip() for mot in self.mots_cles.split(',') if mot.strip()]
-    
-    @classmethod
-    def rechercher(cls, query: str):
-        """Recherche dans les FAQs par mots-clés ou question."""
-        return cls.objects.filter(
-            Q(question__icontains=query) | 
-            Q(reponse__icontains=query) |
-            Q(mots_cles__icontains=query),
-            actif=True
-        )
-    
-    @classmethod
-    def par_categorie(cls, categorie: str):
-        """Retourne les FAQs d'une catégorie."""
-        return cls.objects.filter(categorie=categorie, actif=True)
+Utilisateur (1) --- (0/1) Citoyen
+Utilisateur (1) --- (0/1) Agent
+Utilisateur (1) --- (0/1) Administrateur
 
+Utilisateur (1) --- (N) Demande (citoyen)
+Utilisateur (1) --- (N) Demande (agent assigné)
+
+Service (1) --- (N) Demande
+Service (1) --- (N) Agent
+
+Demande (1) --- (N) Document
+Demande (1) --- (N) Traitement
+Demande (1) --- (N) RendezVous
+Demande (1) --- (N) Notification
+
+Utilisateur (1) --- (N) Document (upload)
+Utilisateur (1) --- (N) Document (vérification)
+Utilisateur (1) --- (N) Traitement
+Utilisateur (1) --- (N) Notification
+"""
