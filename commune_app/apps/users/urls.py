@@ -5,7 +5,7 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
     TokenVerifyView,
 )
-from .views import UtilisateurViewSet, CitoyenViewSet, AgentViewSet, google_login_verify
+from .views import UtilisateurViewSet, CitoyenViewSet, AgentViewSet
 
 router = DefaultRouter()
 router.register(r'utilisateurs', UtilisateurViewSet, basename='utilisateurs')
@@ -18,5 +18,4 @@ urlpatterns = [
     path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
-    path('google-login/', google_login_verify, name='google_login_verify'),
 ]

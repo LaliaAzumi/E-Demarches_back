@@ -10,8 +10,6 @@ from django.utils.encoding import force_bytes, force_str
 from django.core.mail import send_mail
 from django.conf import settings
 from allauth.account.models import EmailAddress
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
 from .models import Utilisateur, Citoyen, Agent
 from .serializers import (
     UtilisateurSerializer, UtilisateurCreateSerializer,
@@ -57,13 +55,7 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             user = serializer.save()
             
             # Créer le profil Citoyen automatiquement
-            Citoyen.objects.create(
-                utilisateur=user,
-                prenom=request.data.get('prenom', ''),
-                date_naissance=request.data.get('date_naissance') or None,
-                cin=request.data.get('cin') or None,
-                adresse=request.data.get('adresse', ''),
-            )
+            Citoyen.objects.create(utilisateur=user)
             
             # Créer l'objet EmailAddress pour allauth
             email_address = EmailAddress.objects.create(
@@ -74,10 +66,7 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             )
             
             # Envoyer l'email de confirmation
-            try:
-                email_address.send_confirmation(request)
-            except Exception as e:
-                logger.warning(f"Erreur envoi email confirmation: {e}")
+            email_address.send_confirmation(request)
             
             tokens = get_tokens_for_user(user)
             return Response({
@@ -119,28 +108,25 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
             
             login(request, user)
             tokens = get_tokens_for_user(user)
-            
-            data = {
+            response_data = {
                 'user': UtilisateurSerializer(user).data,
                 'tokens': tokens,
                 'email_verified': True
             }
-            
-            # Ajouter le profil citoyen/agent
+            # Inclure les données Citoyen ou Agent
             if user.role == 'citoyen':
                 try:
                     citoyen = Citoyen.objects.get(utilisateur=user)
-                    data['citoyen'] = CitoyenSerializer(citoyen).data
+                    response_data['citoyen'] = CitoyenSerializer(citoyen).data
                 except Citoyen.DoesNotExist:
-                    data['citoyen'] = None
+                    pass
             elif user.role == 'agent':
                 try:
                     agent = Agent.objects.get(utilisateur=user)
-                    data['agent'] = AgentSerializer(agent).data
+                    response_data['agent'] = AgentSerializer(agent).data
                 except Agent.DoesNotExist:
-                    data['agent'] = None
-            
-            return Response(data)
+                    pass
+            return Response(response_data)
         
         return Response(
             {'error': 'Email ou mot de passe incorrect'},
@@ -167,8 +153,8 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def me(self, request):
         """
-        GET /api/users/me/
-        Récupère les informations de l'utilisateur connecté (avec profil citoyen/agent)
+        GET /api/users/utilisateurs/me/
+        Récupère les informations de l'utilisateur connecté avec profil Citoyen/Agent
         """
         serializer = UtilisateurSerializer(request.user)
         
@@ -179,83 +165,69 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
         except EmailAddress.DoesNotExist:
             email_verified = False
         
-        data = {
+        response_data = {
             'user': serializer.data,
             'email_verified': email_verified
         }
-        
-        # Ajouter le profil citoyen si applicable
+        # Inclure les données Citoyen ou Agent
         if request.user.role == 'citoyen':
             try:
                 citoyen = Citoyen.objects.get(utilisateur=request.user)
-                data['citoyen'] = CitoyenSerializer(citoyen).data
+                response_data['citoyen'] = CitoyenSerializer(citoyen).data
             except Citoyen.DoesNotExist:
-                data['citoyen'] = None
+                pass
         elif request.user.role == 'agent':
             try:
                 agent = Agent.objects.get(utilisateur=request.user)
-                data['agent'] = AgentSerializer(agent).data
+                response_data['agent'] = AgentSerializer(agent).data
             except Agent.DoesNotExist:
-                data['agent'] = None
-        
-        return Response(data)
+                pass
+        return Response(response_data)
 
     @action(detail=False, methods=['patch'])
     def update_profile(self, request):
         """
-        PATCH /api/users/update_profile/
-        Met à jour les informations du profil utilisateur + citoyen
+        PATCH /api/users/utilisateurs/update_profile/
+        Met à jour le profil utilisateur et citoyen/agent
         """
         user = request.user
-        
-        # Mettre à jour les champs Utilisateur
-        user_fields = ['nom']
-        for field in user_fields:
-            if field in request.data:
-                setattr(user, field, request.data[field])
-        user.save()
-        
-        # Mettre à jour le profil Citoyen si applicable
-        citoyen_data = {}
-        citoyen_fields = ['prenom', 'date_naissance', 'cin', 'adresse']
-        for field in citoyen_fields:
-            if field in request.data:
-                citoyen_data[field] = request.data[field] or None
-        
-        if citoyen_data and user.role == 'citoyen':
+        # Mettre à jour les champs utilisateur
+        nom = request.data.get('nom')
+        if nom:
+            user.nom = nom
+            user.save(update_fields=['nom'])
+        # Mettre à jour les champs citoyen
+        if user.role == 'citoyen':
             try:
                 citoyen = Citoyen.objects.get(utilisateur=user)
-                for field, value in citoyen_data.items():
-                    setattr(citoyen, field, value)
-                citoyen.save()
+                update_fields = []
+                for field in ['prenom', 'date_naissance', 'cin', 'adresse']:
+                    if field in request.data:
+                        setattr(citoyen, field, request.data[field])
+                        update_fields.append(field)
+                if update_fields:
+                    citoyen.save(update_fields=update_fields)
             except Citoyen.DoesNotExist:
-                Citoyen.objects.create(utilisateur=user, **citoyen_data)
-        
-        
-        # Retourner les données mises à jour
-        return self.me(request)
+                pass
+        return Response({
+            'user': UtilisateurSerializer(user).data,
+            'message': 'Profil mis à jour avec succès'
+        })
 
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def check_email_verified(self, request):
         """
-        GET /api/users/check_email_verified/?email=...
-        Vérifie si l'email d'un utilisateur est vérifié
+        GET /api/users/utilisateurs/check_email_verified/?email=...
+        Vérifie si l'email est vérifié (accessible sans auth)
         """
         email = request.query_params.get('email')
         if not email:
             return Response({'error': 'Email requis'}, status=status.HTTP_400_BAD_REQUEST)
-        
         try:
-            email_address = EmailAddress.objects.get(email=email, primary=True)
-            return Response({
-                'email': email,
-                'verified': email_address.verified
-            })
+            email_address = EmailAddress.objects.get(email__iexact=email, primary=True)
+            return Response({'verified': email_address.verified})
         except EmailAddress.DoesNotExist:
-            return Response({
-                'email': email,
-                'verified': False
-            })
+            return Response({'verified': False})
 
     @action(detail=False, methods=['post'])
     def refresh_token(self, request):
@@ -355,8 +327,8 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
     def resend_verification_email(self, request):
         """
-        POST /api/users/resend_verification_email/
-        Renvoyer l'email de confirmation (accessible sans auth)
+        POST /api/users/utilisateurs/resend_verification_email/
+        Renvoyer l'email de confirmation (accessible sans auth, accepte email en paramètre)
         """
         email = request.data.get('email')
         if not email:
@@ -365,7 +337,7 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         try:
-            email_address = EmailAddress.objects.get(email=email, primary=True)
+            email_address = EmailAddress.objects.get(email__iexact=email, primary=True)
             if email_address.verified:
                 return Response(
                     {'message': 'Email déjà vérifié'},
@@ -378,86 +350,6 @@ class UtilisateurViewSet(viewsets.ModelViewSet):
                 {'error': 'Adresse email non trouvée'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def google_login_verify(request):
-    """
-    POST /api/users/google-login/
-    Vérifie le credential Google (ID token) envoyé par le frontend,
-    crée ou connecte l'utilisateur, et renvoie les tokens JWT.
-    """
-    credential = request.data.get('credential')
-    if not credential:
-        return Response(
-            {'error': 'Credential Google requis'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    try:
-        idinfo = id_token.verify_oauth2_token(
-            credential,
-            google_requests.Request(),
-            settings.SOCIALACCOUNT_PROVIDERS['google']['APP']['client_id']
-        )
-    except ValueError as e:
-        logger.warning(f"Google token verification failed: {e}")
-        return Response(
-            {'error': 'Token Google invalide'},
-            status=status.HTTP_401_UNAUTHORIZED
-        )
-
-    email = idinfo.get('email')
-    name = idinfo.get('name', '')
-    if not email:
-        return Response(
-            {'error': 'Email non fourni par Google'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Créer ou récupérer l'utilisateur
-    try:
-        user = Utilisateur.objects.get(email=email)
-    except Utilisateur.DoesNotExist:
-        user = Utilisateur.objects.create_user(
-            email=email,
-            nom=name,
-            mot_de_passe=None,
-            role='citoyen',
-        )
-        Citoyen.objects.create(utilisateur=user)
-
-        # Marquer l'email comme vérifié (Google l'a déjà vérifié)
-        EmailAddress.objects.create(
-            user=user,
-            email=email,
-            primary=True,
-            verified=True
-        )
-
-    # Vérifier/marquer l'email comme vérifié si pas encore fait
-    try:
-        email_address = EmailAddress.objects.get(user=user, primary=True)
-        if not email_address.verified:
-            email_address.verified = True
-            email_address.save()
-    except EmailAddress.DoesNotExist:
-        EmailAddress.objects.create(
-            user=user,
-            email=email,
-            primary=True,
-            verified=True
-        )
-
-    login(request, user)
-    tokens = get_tokens_for_user(user)
-    return Response({
-        'user': UtilisateurSerializer(user).data,
-        'tokens': tokens,
-        'email_verified': True
-    })
 
 
 class CitoyenViewSet(viewsets.ModelViewSet):

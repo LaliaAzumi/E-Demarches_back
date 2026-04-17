@@ -17,11 +17,7 @@ class UtilisateurCreateSerializer(serializers.ModelSerializer):
         fields = ['id', 'email', 'nom', 'role', 'password', 'is_active']
 
     def create(self, validated_data):
-        mot_de_passe = validated_data.pop('password')
-        user = Utilisateur.objects.create_user(
-            mot_de_passe=mot_de_passe,
-            **validated_data
-        )
+        user = Utilisateur.objects.create_user(**validated_data)
         return user
 
 
@@ -31,7 +27,7 @@ class CitoyenSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Citoyen
-        fields = ['id', 'utilisateur', 'utilisateur_id', 'prenom', 'date_naissance', 'cin', 'adresse']
+        fields = ['id', 'utilisateur', 'utilisateur_id', 'cin', 'adresse']
         read_only_fields = ['id']
 
 

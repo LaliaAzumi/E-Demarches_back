@@ -1,6 +1,5 @@
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
-from datetime import date
 
 
 class UtilisateurManager(BaseUserManager):
@@ -31,7 +30,6 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
-    # is_first_login removed - guide/onboarding removed
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = UtilisateurManager()
